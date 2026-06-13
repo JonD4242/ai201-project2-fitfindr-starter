@@ -161,3 +161,56 @@ I gave Claude the Architecture diagram and the Planning Loop + State Management 
 **Step 4:** `create_fit_card(session["outfit_suggestion"], session["selected_item"])` is called. The LLM generates a casual caption. It returns something like: "snagged this graphic tee off depop for $24 and it was literally made for my baggy jeans era 🖤 full look on my stories". This is stored in `session["fit_card"]`.
 
 **Final output to user:** The Gradio interface shows three panels: (1) the listing details (title, price, platform, condition, size), (2) the outfit suggestion text, and (3) the fit card caption. If Step 2 had returned no results, panel 1 would show the error message and panels 2–3 would be empty.
+
+
+---
+
+## Stretch Features
+
+### Price Comparison Tool (`compare_price`)
+
+**What it does:** Estimates whether an item's price is fair by comparing it against similar listings in the dataset. Uses pure data analysis — no LLM call needed.
+
+**Input parameters:**
+- `item` (dict): The listing dict to evaluate. Uses `category`, `style_tags`, `price`, and `id` fields.
+
+**What it returns:** A string with a verdict (great deal / fair / above average), the average price of comparable items, and the cheapest comparable alternative found.
+
+**Implementation:** Finds all listings in the same category, narrows to those with overlapping style tags (falls back to full category if fewer than 3 similar items), calculates the average price, and computes the percentage difference. Called in `run_agent()` after selecting the top result.
+
+---
+
+### Style Profile Memory (`utils/profile.py`)
+
+**What it does:** Saves the user's wardrobe to `~/.fitfindr_profile.json` so they don't have to re-select it every session.
+
+**Functions:** `save_profile(wardrobe)`, `load_profile()`, `profile_exists()`, `delete_profile()`.
+
+**Integration:** The Gradio UI checks `profile_exists()` on startup and adds a 'Saved profile' option to the wardrobe radio if found. A '💾 Save wardrobe to profile' button lets users persist their selection. `run_agent()` receives the loaded wardrobe dict — no changes needed to the agent logic itself.
+
+---
+
+### Trend Awareness (`get_trending_styles`)
+
+**What it does:** Uses the Groq LLM to surface 3-4 currently popular thrift/secondhand styles relevant to the user's size. Called in parallel with the main tool flow (after finding a result, before suggest_outfit).
+
+**Input parameters:**
+- `size` (str | None): Optional size to make recommendations more relevant.
+
+**What it returns:** A formatted list of trending styles, each with a name, one-sentence vibe description, and 2-3 specific thriftable pieces.
+
+**Note:** Since we cannot scrape live fashion platforms, this uses the LLM's training knowledge of fashion trends. Result is stored in `session['trending_styles']` and displayed in a dedicated UI panel.
+
+---
+
+### Retry Logic with Fallback
+
+**What it does:** If `search_listings` returns no results, the agent automatically retries with loosened constraints rather than immediately returning an error.
+
+**Retry sequence:**
+1. First attempt: full constraints (description + size + max_price)
+2. If empty: retry dropping the size filter, keep max_price
+3. If still empty: retry dropping max_price too (description only)
+4. If still empty: return error message
+
+**User communication:** If a retry succeeds, `session['search_adjustment']` is set to a message like '⚠️ Search was broadened: removed size filter (no XS listings found)'. This appears above the listing result in the UI so the user always knows if their constraints were relaxed.

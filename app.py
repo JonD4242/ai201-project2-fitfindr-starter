@@ -1,31 +1,31 @@
 """
 app.py
 
-Gradio interface for FitFindr. The layout and wiring are already set up —
-your job is to fill in handle_query() so it calls run_agent() and maps
-the session results to the three output panels.
+Gradio interface for FitFindr — now with stretch features:
+  - Price comparison panel
+  - Trending styles panel
+  - Style profile memory (save/load wardrobe across sessions)
+  - Retry logic is handled in agent.py; search adjustments shown in listing panel
 
 Run with:
     python app.py
-
-Then open the localhost URL shown in your terminal (usually http://localhost:7860,
-but check your terminal — the port may differ).
 """
 
 import gradio as gr
 
 from agent import run_agent
 from utils.data_loader import get_example_wardrobe, get_empty_wardrobe
+from utils.profile import save_profile, load_profile, profile_exists
 
 
 # ── query handler ─────────────────────────────────────────────────────────────
 
-def _format_listing(item: dict) -> str:
+def _format_listing(item: dict, adjustment: str | None = None) -> str:
     """Format a listing dict into a readable string for the output panel."""
     colors = ", ".join(item.get("colors", []))
     tags = ", ".join(item.get("style_tags", []))
     brand = item.get("brand") or "Unknown"
-    return (
+    text = (
         f"Title:     {item['title']}\n"
         f"Price:     ${item['price']:.2f}\n"
         f"Platform:  {item['platform']}\n"
@@ -36,44 +36,61 @@ def _format_listing(item: dict) -> str:
         f"Style:     {tags}\n\n"
         f"{item['description']}"
     )
+    if adjustment:
+        text = adjustment + "\n\n" + text
+    return text
 
 
-def handle_query(user_query: str, wardrobe_choice: str) -> tuple[str, str, str]:
+def handle_query(
+    user_query: str,
+    wardrobe_choice: str,
+) -> tuple[str, str, str, str, str]:
     """
     Called by Gradio when the user submits a query.
 
-    Args:
-        user_query:     The text the user typed into the search box.
-        wardrobe_choice: Either "Example wardrobe" or "Empty wardrobe (new user)".
-
-    Returns:
-        A tuple of three strings:
-            (listing_text, outfit_suggestion, fit_card)
-        Each string maps to one of the three output panels in the UI.
+    Returns a tuple of 5 strings mapping to the 5 output panels:
+        (listing_text, outfit_suggestion, fit_card, price_comparison, trending_styles)
     """
-    # Step 1: Guard against an empty query
     if not user_query or not user_query.strip():
-        return "Please enter a search query.", "", ""
+        return "Please enter a search query.", "", "", "", ""
 
-    # Step 2: Select the wardrobe based on the user's choice
-    if wardrobe_choice == "Example wardrobe":
+    # Select wardrobe
+    if wardrobe_choice == "Saved profile":
+        wardrobe = load_profile() or get_example_wardrobe()
+    elif wardrobe_choice == "Example wardrobe":
         wardrobe = get_example_wardrobe()
     else:
         wardrobe = get_empty_wardrobe()
 
-    # Step 3: Run the agent planning loop
     session = run_agent(query=user_query.strip(), wardrobe=wardrobe)
 
-    # Step 4: If the agent hit an error, surface it in the first panel
     if session["error"]:
-        return session["error"], "", ""
+        return session["error"], "", "", "", ""
 
-    # Step 5: Format the outputs for each panel
-    listing_text = _format_listing(session["selected_item"])
-    outfit_text = session["outfit_suggestion"] or ""
-    fitcard_text = session["fit_card"] or ""
+    listing_text = _format_listing(
+        session["selected_item"],
+        adjustment=session.get("search_adjustment"),
+    )
 
-    return listing_text, outfit_text, fitcard_text
+    return (
+        listing_text,
+        session["outfit_suggestion"] or "",
+        session["fit_card"] or "",
+        session["price_comparison"] or "",
+        session["trending_styles"] or "",
+    )
+
+
+def handle_save_profile(wardrobe_choice: str) -> str:
+    """Save the currently selected wardrobe to disk."""
+    if wardrobe_choice == "Empty wardrobe (new user)":
+        return "Nothing to save — choose 'Example wardrobe' first."
+    if wardrobe_choice == "Saved profile":
+        wardrobe = load_profile() or get_example_wardrobe()
+    else:
+        wardrobe = get_example_wardrobe()
+    result = save_profile(wardrobe)
+    return f"✅ {result}"
 
 
 # ── interface ─────────────────────────────────────────────────────────────────
@@ -83,15 +100,22 @@ EXAMPLE_QUERIES = [
     "90s track jacket in size M",
     "flowy midi skirt under $40",
     "black combat boots size 8",
-    "designer ballgown size XXS under $5",   # deliberate no-results test
+    "designer ballgown size XXS under $5",   # triggers error path
+    "vintage jacket size XXS under $20",     # triggers retry logic
 ]
 
+
 def build_interface():
+    # Build wardrobe choices — include "Saved profile" only if one exists
+    wardrobe_choices = ["Example wardrobe", "Empty wardrobe (new user)"]
+    if profile_exists():
+        wardrobe_choices.insert(0, "Saved profile")
+
     with gr.Blocks(title="FitFindr") as demo:
         gr.Markdown("""
 # FitFindr 🛍️
-Find secondhand pieces and get outfit ideas based on your wardrobe.
-Describe what you're looking for — include size and price if you want to filter.
+Find secondhand pieces and get outfit ideas, price checks, and trend inspiration.
+Describe what you're looking for — include size and price to filter results.
         """)
 
         with gr.Row():
@@ -101,47 +125,71 @@ Describe what you're looking for — include size and price if you want to filte
                 lines=2,
                 scale=3,
             )
-            wardrobe_choice = gr.Radio(
-                choices=["Example wardrobe", "Empty wardrobe (new user)"],
-                value="Example wardrobe",
-                label="Wardrobe",
-                scale=1,
-            )
+            with gr.Column(scale=1):
+                wardrobe_choice = gr.Radio(
+                    choices=wardrobe_choices,
+                    value=wardrobe_choices[0],
+                    label="Wardrobe",
+                )
+                save_btn = gr.Button("💾 Save wardrobe to profile", size="sm")
+                save_status = gr.Textbox(label="", lines=1, interactive=False, show_label=False)
 
         submit_btn = gr.Button("Find it", variant="primary")
 
+        # Row 1: Core results
         with gr.Row():
             listing_output = gr.Textbox(
                 label="🛍️ Top listing found",
-                lines=8,
+                lines=10,
                 interactive=False,
             )
             outfit_output = gr.Textbox(
                 label="👗 Outfit idea",
-                lines=8,
+                lines=10,
                 interactive=False,
             )
             fitcard_output = gr.Textbox(
                 label="✨ Your fit card",
-                lines=8,
+                lines=10,
+                interactive=False,
+            )
+
+        # Row 2: Stretch feature outputs
+        with gr.Row():
+            price_output = gr.Textbox(
+                label="💰 Price check",
+                lines=6,
+                interactive=False,
+            )
+            trending_output = gr.Textbox(
+                label="🔥 Trending styles",
+                lines=6,
                 interactive=False,
             )
 
         gr.Examples(
-            examples=[[q, "Example wardrobe"] for q in EXAMPLE_QUERIES],
+            examples=[[q, wardrobe_choices[0]] for q in EXAMPLE_QUERIES],
             inputs=[query_input, wardrobe_choice],
             label="Try these queries",
         )
 
+        # Wire up buttons
         submit_btn.click(
             fn=handle_query,
             inputs=[query_input, wardrobe_choice],
-            outputs=[listing_output, outfit_output, fitcard_output],
+            outputs=[listing_output, outfit_output, fitcard_output,
+                     price_output, trending_output],
         )
         query_input.submit(
             fn=handle_query,
             inputs=[query_input, wardrobe_choice],
-            outputs=[listing_output, outfit_output, fitcard_output],
+            outputs=[listing_output, outfit_output, fitcard_output,
+                     price_output, trending_output],
+        )
+        save_btn.click(
+            fn=handle_save_profile,
+            inputs=[wardrobe_choice],
+            outputs=[save_status],
         )
 
     return demo
